@@ -14,8 +14,9 @@
 
   const WALLET_RISK_INFO =
     "<strong>0–100</strong> score for the <strong>seed wallet</strong> only, based on the loaded history (heuristic; not a legal or exhaustive assessment). " +
-    "Three normalized signals (0–1) are combined: <strong>35%</strong> deployer strength (contracts created), <strong>40%</strong> relayer strength (diversity of outgoing destinations), " +
-    "<strong>25%</strong> temporal bursts. The low / medium / high label uses thresholds at <strong>40</strong> and <strong>70</strong>.";
+    "Four normalized signals (0–1) are combined: <strong>28%</strong> deployer strength (contracts created), <strong>32%</strong> relayer strength (diversity of outgoing destinations), " +
+    "<strong>20%</strong> temporal bursts, <strong>20%</strong> inbound fund concentration (share of native inflow from the largest single sender). " +
+    "The low / medium / high label uses thresholds at <strong>40</strong> and <strong>70</strong>.";
 
   const CLUSTER_RISK_INFO =
     "Summarizes <strong>all wallets</strong> in this analysis (seed + expanded neighbors). " +
@@ -150,6 +151,7 @@
     const dep = heur.deployer || {};
     const rel = heur.relayer || {};
     const tim = heur.timing || {};
+    const fund = heur.fund_concentration || {};
 
     const scoreBlock = (label, obj) => {
       const sc = obj.score != null ? obj.score : "—";
@@ -207,6 +209,16 @@
         escapeHtml(String(tim.burst_score ?? "—")) +
         " · txs " +
         escapeHtml(String(tim.tx_count ?? "—")) +
+        "</li>" +
+        "<li><strong>Fund concentration</strong>: top sender share " +
+        escapeHtml(
+          fund.top_sender_share != null ? String(fund.top_sender_share) : "—"
+        ) +
+        (fund.top_sender
+          ? " · <code>" + escapeHtml(String(fund.top_sender)) + "</code>"
+          : "") +
+        " · strength " +
+        escapeHtml(String(fund.concentration_strength ?? "—")) +
         "</li>" +
         "</ul>"
     );

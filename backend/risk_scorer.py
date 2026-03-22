@@ -6,21 +6,29 @@ from __future__ import annotations
 
 from typing import Any
 
+# Sum to 1.0 — prior 35/40/25 split among first three scaled by 0.8, plus 20% fund concentration
+_W_DEPLOYER = 0.28
+_W_RELAYER = 0.32
+_W_TIMING = 0.20
+_W_FUND = 0.20
+
 
 def wallet_risk_score(heuristic_bundle: dict[str, Any]) -> dict[str, Any]:
     d = heuristic_bundle.get("deployer", {})
     r = heuristic_bundle.get("relayer", {})
     t = heuristic_bundle.get("timing", {})
+    fc = heuristic_bundle.get("fund_concentration", {})
 
     deployer_strength = float(d.get("deployer_strength", 0.0))
     relayer_strength = float(r.get("relayer_strength", 0.0))
     burst = float(t.get("burst_score", 0.0))
+    concentration = float(fc.get("concentration_strength", 0.0))
 
-    # Weights sum to 1.0 — tuned for interpretability, not ground truth
     score_01 = (
-        0.35 * deployer_strength
-        + 0.40 * relayer_strength
-        + 0.25 * burst
+        _W_DEPLOYER * deployer_strength
+        + _W_RELAYER * relayer_strength
+        + _W_TIMING * burst
+        + _W_FUND * concentration
     )
     score_100 = int(round(max(0.0, min(1.0, score_01)) * 100))
 
@@ -34,9 +42,10 @@ def wallet_risk_score(heuristic_bundle: dict[str, Any]) -> dict[str, Any]:
         "score": score_100,
         "label": label,
         "components": {
-            "deployer_weighted": round(0.35 * deployer_strength * 100, 1),
-            "relayer_weighted": round(0.40 * relayer_strength * 100, 1),
-            "timing_weighted": round(0.25 * burst * 100, 1),
+            "deployer_weighted": round(_W_DEPLOYER * deployer_strength * 100, 1),
+            "relayer_weighted": round(_W_RELAYER * relayer_strength * 100, 1),
+            "timing_weighted": round(_W_TIMING * burst * 100, 1),
+            "fund_concentration_weighted": round(_W_FUND * concentration * 100, 1),
         },
     }
 

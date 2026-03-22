@@ -1,5 +1,6 @@
 """
-AML-style heuristics: deployer (contract creation), relayer (fan-out), timing (bursts).
+AML-style heuristics: deployer (contract creation), relayer (fan-out), timing (bursts),
+fund concentration (share of inbound native volume from the largest single sender).
 Returns structured signals in [0, 1] where useful for scoring.
 """
 
@@ -123,9 +124,59 @@ def timing_signals(txs: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def fund_concentration_signals(txs: list[dict[str, Any]], seed: str) -> dict[str, Any]:
+    """
+    Inbound native value (wei) by counterparty: classic AML-style single-source funding heuristic.
+    """
+    seed_l = seed.lower()
+    by_from: dict[str, int] = defaultdict(int)
+    inbound_with_value = 0
+    for tx in txs:
+        if tx.get("isError") == "1":
+            continue
+        f = (tx.get("from") or "").lower()
+        t = (tx.get("to") or "").lower()
+        if not f or f == seed_l or t != seed_l:
+            continue
+        try:
+            wei = int(tx.get("value") or 0)
+        except (TypeError, ValueError):
+            wei = 0
+        if wei <= 0:
+            continue
+        inbound_with_value += 1
+        by_from[f] += wei
+
+    total_in = sum(by_from.values())
+    if total_in <= 0 or not by_from:
+        return {
+            "inbound_native_count": 0,
+            "unique_inbound_senders": 0,
+            "total_inbound_wei": 0,
+            "top_sender": None,
+            "top_sender_share": None,
+            "concentration_strength": 0.0,
+        }
+
+    top_sender, top_wei = max(by_from.items(), key=lambda kv: kv[1])
+    share = top_wei / total_in
+    # Risk rises when most inbound volume is from one address (interpretive, not a legal test)
+    strength = min(1.0, max(0.0, (share - 0.5) / 0.45))
+
+    return {
+        "inbound_native_count": inbound_with_value,
+        "unique_inbound_senders": len(by_from),
+        "total_inbound_wei": total_in,
+        "top_sender": top_sender,
+        "top_sender_share": round(share, 4),
+        "concentration_strength": round(strength, 4),
+    }
+
+
 def run_all(txs: list[dict[str, Any]], seed: str) -> dict[str, Any]:
     return {
         "deployer": deployer_signals(txs),
         "relayer": relayer_signals(txs, seed),
         "timing": timing_signals(txs),
+        "fund_concentration": fund_concentration_signals(txs, seed),
     }

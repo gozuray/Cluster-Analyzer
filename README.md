@@ -8,22 +8,25 @@ Use cases include **AML-style triage**, **open-source intelligence**, and **fore
 
 - **Counterparty graph** — Nodes are addresses; edges aggregate native-value transfers (`value` field) between `from` and `to`. The UI subgraph keeps the seed, edges incident to the seed, and edges **between direct neighbors** of the seed (so shared peers among neighbors appear as links).
 - **Neighbor selection (depth ≥ 1)** — Counterparties of the seed are ranked by how often they appear in the seed’s successful txs; the top **N** wallets are fetched (default **24**, capped higher when `depth=2`). **`depth=0`** analyzes only the seed (no extra wallets).
-- **Per-wallet heuristics** — Deployer-style activity, outgoing fan-out / small-value pattern, and hourly burst density (see below). Each loaded wallet (seed + neighbors) gets a **0–100** score and label (`low` / `medium` / `high`).
+- **Per-wallet heuristics** — Deployer-style activity, outgoing fan-out / small-value pattern, hourly burst density, and inbound **fund concentration** (share of native inflow from the largest sender). Each loaded wallet (seed + neighbors) gets a **0–100** score and label (`low` / `medium` / `high`).
 - **Cluster score** — A rollup over those wallet scores (emphasizes the worst wallet, blends in the average) so you get one **cluster-level** number alongside the seed’s own score.
 
 ## Risk heuristics (as implemented)
 
-Signals are computed from the **transaction list** returned by the explorer (successful txs only where `isError != "1"`). The wallet score is a weighted blend of three **0–1** strengths:
+Signals are computed from the **transaction list** returned by the explorer (successful txs only where `isError != "1"`). The wallet score is a weighted blend of four **0–1** strengths:
 
 | Component | Weight | Meaning |
 |-----------|--------|---------|
-| **Deployer** | 35% | Count of **contract creations** from this wallet (transactions with an empty `to` field). Higher deployment count and share of txs that are deployments increase the signal. |
-| **Relayer-style fan-out** | 40% | Many **distinct outgoing destinations** and a high share of **small native outflows** (outgoing `value` ≤ **0.1** of the chain’s native unit, e.g. ETH on mainnet). Intended to surface dispersal / automation-like patterns, not a labeled “mixer” flag. |
-| **Timing bursts** | 25% | Activity in **1-hour** buckets: dense hours (starting from **8+** txs in the same hour) increase the burst score. |
+| **Deployer** | 28% | Count of **contract creations** from this wallet (transactions with an empty `to` field). Higher deployment count and share of txs that are deployments increase the signal. |
+| **Relayer-style fan-out** | 32% | Many **distinct outgoing destinations** and a high share of **small native outflows** (outgoing `value` ≤ **0.1** of the chain’s native unit, e.g. ETH on mainnet). Intended to surface dispersal / automation-like patterns, not a labeled “mixer” flag. |
+| **Timing bursts** | 20% | Activity in **1-hour** buckets: dense hours (starting from **8+** txs in the same hour) increase the burst score. |
+| **Fund concentration** | 20% | **Inbound native** transfers to this wallet (`to` = wallet, `from` ≠ wallet, positive `value`): share of total inbound wei from the **single largest** `from` address. A 0–1 **concentration strength** ramps from **50%** share upward (full weight near **~95%** from one sender). Classic AML-style single-source funding heuristic; token flows are not included unless the API exposes them in this list. |
 
 **Cluster aggregation:** `cluster.score ≈ 0.65 × max(wallet scores) + 0.35 × average(wallet scores)` (capped at 100), with the same low/medium/high bands as the wallet score (thresholds at **40** and **70**).
 
-**Not in scope today:** inbound “fund concentration” (% from one source), cross-wallet “same factory deployer” tracing, or chain-specific decoding (ERC-20/NFT transfers are not the primary edge model unless reflected in the normalized `from`/`to`/`value` you get from the API).
+For how clusters and scores are meant to be interpreted (and known limits), see [METHODOLOGY.md](METHODOLOGY.md).
+
+**Not in scope today:** cross-wallet “same factory deployer” tracing, or full chain-specific decoding (ERC-20/NFT transfers are not the primary edge model unless reflected in the normalized `from`/`to`/`value` you get from the API).
 
 ## Example response (anonymized)
 
@@ -41,7 +44,8 @@ Shape returned by `POST /analyze` (fields mirror `_assemble_report` in `backend/
       "components": {
         "deployer_weighted": 0.0,
         "relayer_weighted": 6.2,
-        "timing_weighted": 5.8
+        "timing_weighted": 5.8,
+        "fund_concentration_weighted": 4.0
       }
     },
     "cluster": {
@@ -68,6 +72,14 @@ Shape returned by `POST /analyze` (fields mirror `_assemble_report` in `backend/
       "tx_count": 512,
       "median_gap_seconds": 420.5,
       "burst_score": 0.232
+    },
+    "fund_concentration": {
+      "inbound_native_count": 48,
+      "unique_inbound_senders": 6,
+      "total_inbound_wei": 1250000000000000000,
+      "top_sender": "0xfeed…",
+      "top_sender_share": 0.612,
+      "concentration_strength": 0.249
     }
   },
   "neighbors": [{ "address": "0x…", "tx_count": 10000 }],
