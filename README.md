@@ -1,53 +1,60 @@
 # Cluster Analyzer
 
-Herramienta web para analizar direcciones Ethereum: obtiene transacciones vía Etherscan, construye un grafo de relaciones con vecinos, aplica heurísticas y calcula puntuaciones de riesgo a nivel de wallet y de clúster.
+Web tool to analyze Ethereum addresses: it fetches transactions via Etherscan, builds a relationship graph with neighbors, applies heuristics, and computes wallet- and cluster-level risk scores.
 
-## Requisitos
+## Requirements
 
-- Python 3.12+ (recomendado)
-- Una [API key de Etherscan](https://etherscan.io/apis)
+- Python 3.12+ (recommended)
+- An [Etherscan API key](https://etherscan.io/apis)
 
-## Configuración
+## Setup
 
-1. Clona el repositorio e instala dependencias:
+1. Clone the repository and install dependencies:
 
 ```bash
-cd wallet-cluster-analyzer
+cd Cluster-Analyzer
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-En Linux o macOS usa `source .venv/bin/activate` en lugar de la línea de activación de Windows.
+On Linux or macOS, use `source .venv/bin/activate` instead of the Windows activation line above.
 
-2. Variables de entorno: copia `.env.example` a `.env` y define `ETHERSCAN_API_KEY` con tu clave. Opcionalmente puedes ajustar `ETHERSCAN_BASE_URL` y `CHAIN_ID` según la red.
+2. Environment variables: copy `.env.example` to `.env` and set `ETHERSCAN_API_KEY` to your key. Optionally adjust `ETHERSCAN_BASE_URL` and `CHAIN_ID` for your network.
 
-## Ejecución
+## Running
 
-Desde la carpeta del proyecto (con el entorno virtual activado):
+From the project folder (with the virtual environment activated):
 
 ```bash
 uvicorn backend.main:app --reload
 ```
 
-Abre el navegador en la raíz del servidor (por defecto `http://127.0.0.1:8000/`) para usar la interfaz. La API documentada está disponible en `/docs` (Swagger).
+Open the browser at the server root (by default `http://127.0.0.1:8000/`) for the UI. The documented API is at `/docs` (Swagger).
 
-## API principal
+## UI preview
 
-| Método | Ruta | Descripción |
+Example of the live graph, risk panel, and streaming load progress (depth 1):
+
+![Wallet cluster analyzer UI](docs/examples/ui-wallet-cluster-analyzer.png)
+
+## Main API
+
+| Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Comprobación de estado |
-| POST | `/analyze` | Informe completo: riesgo, heurísticas, vecinos y grafo |
-| GET | `/graph` | Solo el JSON del grafo (más ligero que `/analyze`) |
+| GET | `/health` | Health check |
+| POST | `/analyze` | Full report: risk, heuristics, neighbors, and graph |
+| GET | `/graph` | Graph JSON only (lighter than `/analyze`) |
 
-El cuerpo de `POST /analyze` admite `address`, `depth` (0–2), `force_refresh` y `neighbor_limit` opcional.
+The `POST /analyze` body accepts `address`, `depth` (0–2), `force_refresh`, and optional `neighbor_limit`.
 
-## Estructura del proyecto
+## Project layout
 
-- `backend/` — FastAPI, motor de clúster, fetch de transacciones, heurísticas y scoring
-- `frontend/` — Interfaz estática y visualización del grafo
-- `cache/` — Caché local de transacciones (JSON; no versionado en git)
+- `backend/` — FastAPI, cluster engine, transaction fetch, heuristics, and scoring
+- `frontend/` — Static UI and graph visualization
+- `docs/examples/` — Screenshots and other visual examples
+- `cache/` — Local transaction cache (JSON; not versioned in git)
 
-## Licencia
+## License
 
-Uso del repositorio según lo defina el propietario del proyecto.
+Use of this repository is governed by the project owner.
