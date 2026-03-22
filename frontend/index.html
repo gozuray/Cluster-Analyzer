@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Wallet Cluster Analyzer</title>
+    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+    <style>
+      :root {
+        --bg: #0c0f14;
+        --panel: #141a22;
+        --border: #243044;
+        --text: #e8edf4;
+        --muted: #8b9bb5;
+        --accent: #3b82f6;
+        --risk-high: #f87171;
+        --risk-mid: #fbbf24;
+        --risk-low: #34d399;
+        --font: "Segoe UI", system-ui, sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: var(--font);
+        background: var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+      header {
+        padding: 1rem 1.25rem;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      header h1 {
+        margin: 0;
+        font-size: 1.15rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: center;
+        flex: 1;
+      }
+      .toolbar input[type="text"] {
+        min-width: 280px;
+        flex: 1;
+        max-width: 420px;
+        padding: 0.5rem 0.65rem;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: #0e131b;
+        color: var(--text);
+      }
+      .toolbar select,
+      .toolbar button {
+        padding: 0.5rem 0.75rem;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--panel);
+        color: var(--text);
+        cursor: pointer;
+      }
+      .toolbar button.primary {
+        background: var(--accent);
+        border-color: #2563eb;
+        font-weight: 600;
+      }
+      .toolbar button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      main {
+        flex: 1;
+        display: grid;
+        grid-template-columns: minmax(280px, 340px) 1fr;
+        min-height: 0;
+      }
+      @media (max-width: 900px) {
+        main {
+          grid-template-columns: 1fr;
+        }
+      }
+      #panel-host {
+        border-right: 1px solid var(--border);
+        overflow: auto;
+        background: var(--panel);
+      }
+      #graph-host {
+        position: relative;
+        min-height: 420px;
+      }
+      #graph-host svg {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      .hint {
+        color: var(--muted);
+        font-size: 0.85rem;
+        padding: 0 1.25rem 0.75rem;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Wallet cluster analyzer</h1>
+      <div class="toolbar">
+        <input
+          type="text"
+          id="addr-input"
+          placeholder="0x… seed address"
+          spellcheck="false"
+          autocomplete="off"
+        />
+        <select id="depth-select" title="Expansion depth">
+          <option value="0">Depth 0 (seed only)</option>
+          <option value="1" selected>Depth 1 (+ neighbors)</option>
+          <option value="2">Depth 2 (more neighbors)</option>
+        </select>
+        <button type="button" class="primary" id="analyze-btn">Analyze</button>
+      </div>
+    </header>
+    <p class="hint">
+      Backend: Etherscan-compatible API · JSON cache under
+      <code>cache/</code> · Set <code>ETHERSCAN_API_KEY</code> in
+      <code>.env</code>.
+    </p>
+    <main>
+      <div id="panel-host"></div>
+      <div id="graph-host"></div>
+    </main>
+    <script src="/static/panel.js"></script>
+    <script src="/static/graph.js"></script>
+    <script>
+      (function () {
+        const input = document.getElementById("addr-input");
+        const depth = document.getElementById("depth-select");
+        const btn = document.getElementById("analyze-btn");
+        async function run() {
+          const addr = (input.value || "").trim();
+          if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) {
+            window.renderPanel({
+              error: "Enter a valid 0x-prefixed 20-byte address.",
+            });
+            return;
+          }
+          btn.disabled = true;
+          window.renderPanel({ loading: true });
+          try {
+            const res = await fetch("/analyze", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                address: addr,
+                depth: parseInt(depth.value, 10),
+                force_refresh: false,
+              }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+              window.renderPanel({
+                error: data.detail || res.statusText || "Request failed",
+              });
+              return;
+            }
+            window.renderPanel(data);
+            window.renderGraph(data.graph || {});
+          } catch (e) {
+            window.renderPanel({ error: String(e) });
+          } finally {
+            btn.disabled = false;
+          }
+        }
+        btn.addEventListener("click", run);
+        input.addEventListener("keydown", (ev) => {
+          if (ev.key === "Enter") run();
+        });
+      })();
+    </script>
+  </body>
+</html>
