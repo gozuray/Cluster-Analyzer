@@ -5,8 +5,10 @@ Caches per-wallet JSON under cache/<address_lower>.json
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import random
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +19,26 @@ import httpx
 from .config import settings
 
 logger = logging.getLogger(__name__)
+
+# Global pacing so parallel / multi-wallet fetches stay under free-tier ~3 req/s.
+_es_lock = asyncio.Lock()
+_last_es_request_mono: float = 0.0
+_MIN_ES_INTERVAL_SEC = 0.35
+
+
+async def _pace_etherscan() -> None:
+    global _last_es_request_mono
+    async with _es_lock:
+        now = time.monotonic()
+        wait = _MIN_ES_INTERVAL_SEC - (now - _last_es_request_mono)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_es_request_mono = time.monotonic()
+
+
+def _is_rate_limit_message(message: str) -> bool:
+    m = message.lower()
+    return "rate limit" in m or "max calls per sec" in m
 
 
 def _cache_path(address: str) -> Path:
@@ -83,19 +105,41 @@ async def fetch_transactions(
                 "sort": "asc",
                 "apikey": settings.etherscan_api_key,
             }
-            r = await client.get(settings.etherscan_base_url, params=params)
-            r.raise_for_status()
-            body = r.json()
-            status = str(body.get("status", ""))
-            message = str(body.get("message", ""))
-            result = body.get("result")
 
-            if status == "0" and message == "No transactions found":
+            body: dict[str, Any] = {}
+            result: list | str | dict | None = None
+            for attempt in range(12):
+                await _pace_etherscan()
+                r = await client.get(settings.etherscan_base_url, params=params)
+                r.raise_for_status()
+                body = r.json()
+                status = str(body.get("status", ""))
+                message = str(body.get("message", ""))
+                result = body.get("result")
+
+                if status == "0" and message == "No transactions found":
+                    result = []
+                    break
+                if status != "1" or not isinstance(result, list):
+                    err = body.get("result", message)
+                    if status == "0" and _is_rate_limit_message(message) and attempt < 11:
+                        delay = 1.0 + 0.35 * attempt + random.uniform(0, 0.4)
+                        logger.warning(
+                            "etherscan rate limit %s page %s, retry in %.2fs",
+                            addr[:10],
+                            page,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    raise RuntimeError(f"Etherscan error: {message} — {err}")
                 break
-            if status != "1" or not isinstance(result, list):
-                err = body.get("result", message)
-                raise RuntimeError(f"Etherscan error: {message} — {err}")
+            else:
+                raise RuntimeError(
+                    "Etherscan error: rate limit — too many retries for one page"
+                )
 
+            assert isinstance(result, list)
             if not result:
                 break
 
@@ -106,7 +150,6 @@ async def fetch_transactions(
             if len(result) < settings.tx_page_size:
                 break
             page += 1
-            time.sleep(0.22)  # stay under free-tier rate limits
 
     payload = {
         "address": addr,

@@ -4,18 +4,18 @@ FastAPI app: /analyze (full report), /graph (graph JSON), static frontend.
 
 from __future__ import annotations
 
-import asyncio
+import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .cluster_engine import build_graph_from_txs, merge_tx_maps
+from .cluster_engine import build_graph_from_txs
 from .config import settings
 from .heuristics import run_all
 from .risk_scorer import cluster_risk_score, wallet_risk_score
@@ -67,6 +67,100 @@ def _top_neighbors(seed: str, txs: list[dict[str, Any]], limit: int) -> list[str
     return [a for a, _ in ranked[:limit]]
 
 
+def _assemble_report(
+    seed_lower: str,
+    depth: int,
+    txs_map: dict[str, list[dict[str, Any]]],
+    neighbor_meta: list[dict[str, Any]],
+) -> dict[str, Any]:
+    seed_txs = txs_map[seed_lower]
+    heur = run_all(seed_txs, seed_lower)
+    wallet_score = wallet_risk_score(heur)
+    graph = build_graph_from_txs(txs_map, seed_lower)
+    wallet_scores_list = [wallet_score["score"]]
+    per_wallet_risk: dict[str, Any] = {seed_lower: wallet_score}
+    for nb in neighbor_meta:
+        a = nb["address"]
+        txs_nb = txs_map.get(a, [])
+        h = run_all(txs_nb, a)
+        wr = wallet_risk_score(h)
+        per_wallet_risk[a] = wr
+        wallet_scores_list.append(wr["score"])
+    cluster = cluster_risk_score(wallet_scores_list)
+    return {
+        "address": seed_lower,
+        "depth": depth,
+        "chain_id": settings.chain_id,
+        "risk": {
+            "wallet": wallet_score,
+            "cluster": cluster,
+        },
+        "heuristics": heur,
+        "per_wallet": per_wallet_risk,
+        "neighbors": neighbor_meta,
+        "graph": graph,
+    }
+
+
+async def _fetch_neighbors_sequential(
+    seed_lower: str,
+    seed_txs: list[dict[str, Any]],
+    neighbors: list[str],
+    *,
+    neighbor_force_refresh: bool,
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    txs_map: dict[str, list[dict[str, Any]]] = {seed_lower: seed_txs}
+    neighbor_meta: list[dict[str, Any]] = []
+    for nb in neighbors:
+        nb_l = nb.lower()
+        try:
+            nb_txs = await fetch_transactions(
+                nb,
+                use_cache=True,
+                force_refresh=neighbor_force_refresh,
+            )
+            neighbor_meta.append({"address": nb_l, "tx_count": len(nb_txs)})
+            txs_map[nb_l] = nb_txs
+        except Exception as e:
+            logger.warning("neighbor fetch failed %s: %s", nb, e)
+            cached = load_cached_transactions(nb)
+            if cached is not None:
+                txs_map[nb_l] = cached
+                neighbor_meta.append(
+                    {
+                        "address": nb_l,
+                        "tx_count": len(cached),
+                        "from_cache_only": True,
+                    }
+                )
+    return txs_map, neighbor_meta
+
+
+async def _refresh_stale_neighbors(
+    txs_map: dict[str, list[dict[str, Any]]],
+    neighbor_meta: list[dict[str, Any]],
+) -> tuple[int, int]:
+    """Retry network fetch for neighbors marked from_cache_only. Returns (ok, failed)."""
+    ok = 0
+    failed = 0
+    for m in neighbor_meta:
+        if not m.get("from_cache_only"):
+            continue
+        a = m["address"]
+        try:
+            nb_txs = await fetch_transactions(
+                a, use_cache=True, force_refresh=True
+            )
+            txs_map[a] = nb_txs
+            m["tx_count"] = len(nb_txs)
+            del m["from_cache_only"]
+            ok += 1
+        except Exception as e:
+            logger.warning("stale neighbor refresh failed %s: %s", a, e)
+            failed += 1
+    return ok, failed
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -82,6 +176,8 @@ async def analyze(body: AnalyzeBody) -> dict[str, Any]:
     if body.depth == 2:
         limit = min(64, limit * 2)
 
+    seed_lower = addr.lower()
+
     try:
         seed_txs = await fetch_transactions(
             addr, use_cache=True, force_refresh=body.force_refresh
@@ -92,79 +188,212 @@ async def analyze(body: AnalyzeBody) -> dict[str, Any]:
         logger.exception("fetch seed")
         raise HTTPException(status_code=502, detail=f"Upstream error: {e}") from e
 
-    txs_map: dict[str, list[dict[str, Any]]] = {addr.lower(): seed_txs}
+    txs_map: dict[str, list[dict[str, Any]]] = {seed_lower: seed_txs}
     neighbor_meta: list[dict[str, Any]] = []
 
     if body.depth >= 1:
-        neighbors = _top_neighbors(addr.lower(), seed_txs, limit)
+        neighbors = _top_neighbors(seed_lower, seed_txs, limit)
+        txs_map, neighbor_meta = await _fetch_neighbors_sequential(
+            seed_lower,
+            seed_txs,
+            neighbors,
+            neighbor_force_refresh=body.force_refresh,
+        )
 
-        async def _fetch_neighbor(
-            nb: str,
-        ) -> tuple[str, list[dict[str, Any]] | None, dict[str, Any] | None]:
-            nb_l = nb.lower()
-            try:
-                nb_txs = await fetch_transactions(
-                    nb,
-                    use_cache=not body.force_refresh,
-                    force_refresh=body.force_refresh,
-                )
-                return (
-                    nb_l,
-                    nb_txs,
-                    {"address": nb_l, "tx_count": len(nb_txs)},
-                )
-            except Exception as e:
-                logger.warning("neighbor fetch failed %s: %s", nb, e)
-                cached = load_cached_transactions(nb)
-                if cached is not None:
-                    return (
-                        nb_l,
-                        cached,
-                        {
-                            "address": nb_l,
-                            "tx_count": len(cached),
-                            "from_cache_only": True,
-                        },
-                    )
-                return (nb_l, None, None)
+    stale_ok, stale_fail = await _refresh_stale_neighbors(txs_map, neighbor_meta)
 
-        gathered = await asyncio.gather(*(_fetch_neighbor(nb) for nb in neighbors))
-        for nb_l, txs, meta in gathered:
-            if txs is not None and meta is not None:
-                txs_map[nb_l] = txs
-                neighbor_meta.append(meta)
+    out = _assemble_report(seed_lower, body.depth, txs_map, neighbor_meta)
+    if stale_ok or stale_fail:
+        out["sync_note"] = {
+            "stale_refreshed": stale_ok,
+            "stale_still_cached": stale_fail,
+        }
+    return out
 
+
+async def _analyze_event_bytes(body: AnalyzeBody) -> AsyncIterator[bytes]:
+    def sse(obj: dict[str, Any]) -> bytes:
+        return f"data: {json.dumps(obj, default=str)}\n\n".encode("utf-8")
+
+    addr = body.address.strip()
+    if not addr.startswith("0x") or len(addr) != 42:
+        yield sse({"event": "error", "detail": "Invalid address format"})
+        return
+
+    limit = body.neighbor_limit or settings.neighbor_limit
+    if body.depth == 2:
+        limit = min(64, limit * 2)
     seed_lower = addr.lower()
-    heur = run_all(seed_txs, seed_lower)
-    wallet_score = wallet_risk_score(heur)
 
-    graph = build_graph_from_txs(txs_map, seed_lower)
+    yield sse({"event": "status", "sync": {"phase": "started", "message": "Starting…"}})
 
-    wallet_scores_list = [wallet_score["score"]]
-    per_wallet_risk: dict[str, Any] = {seed_lower: wallet_score}
-    for nb in neighbor_meta:
-        a = nb["address"]
-        txs_nb = txs_map.get(a, [])
-        h = run_all(txs_nb, a)
-        wr = wallet_risk_score(h)
-        per_wallet_risk[a] = wr
-        wallet_scores_list.append(wr["score"])
+    preview_emitted = False
+    if not body.force_refresh:
+        cached_seed = load_cached_transactions(addr)
+        if cached_seed is not None:
+            txs_pre: dict[str, list[dict[str, Any]]] = {seed_lower: cached_seed}
+            meta_pre: list[dict[str, Any]] = []
+            if body.depth >= 1:
+                for nb in _top_neighbors(seed_lower, cached_seed, limit):
+                    c = load_cached_transactions(nb)
+                    if c is not None:
+                        nl = nb.lower()
+                        txs_pre[nl] = c
+                        meta_pre.append(
+                            {
+                                "address": nl,
+                                "tx_count": len(c),
+                                "from_cache_only": True,
+                            }
+                        )
+            report = _assemble_report(seed_lower, body.depth, txs_pre, meta_pre)
+            yield sse(
+                {
+                    "event": "snapshot",
+                    "data": report,
+                    "sync": {
+                        "phase": "cached_preview",
+                        "message": "Showing cached snapshot; syncing with the network…",
+                    },
+                }
+            )
+            preview_emitted = True
 
-    cluster = cluster_risk_score(wallet_scores_list)
+    seed_force = body.force_refresh or preview_emitted
+    try:
+        seed_txs = await fetch_transactions(
+            addr, use_cache=True, force_refresh=seed_force
+        )
+    except RuntimeError as e:
+        yield sse({"event": "error", "detail": str(e)})
+        return
+    except Exception as e:
+        logger.exception("stream fetch seed")
+        yield sse({"event": "error", "detail": f"Upstream error: {e}"})
+        return
 
-    return {
-        "address": seed_lower,
-        "depth": body.depth,
-        "chain_id": settings.chain_id,
-        "risk": {
-            "wallet": wallet_score,
-            "cluster": cluster,
+    txs_map = {seed_lower: seed_txs}
+    neighbor_meta: list[dict[str, Any]] = []
+    nb_force = body.force_refresh or preview_emitted
+
+    report = _assemble_report(seed_lower, body.depth, txs_map, neighbor_meta)
+    yield sse(
+        {
+            "event": "snapshot",
+            "data": report,
+            "sync": {
+                "phase": "syncing",
+                "step": "seed",
+                "message": "Seed wallet data loaded from the network.",
+            },
+        }
+    )
+
+    if body.depth < 1:
+        yield sse(
+            {
+                "event": "done",
+                "message": "Analysis complete. Seed wallet is up to date.",
+            }
+        )
+        return
+
+    neighbors = _top_neighbors(seed_lower, seed_txs, limit)
+    n_total = len(neighbors)
+
+    for i, nb in enumerate(neighbors):
+        nb_l = nb.lower()
+        try:
+            nb_txs = await fetch_transactions(
+                nb, use_cache=True, force_refresh=nb_force
+            )
+            neighbor_meta.append({"address": nb_l, "tx_count": len(nb_txs)})
+            txs_map[nb_l] = nb_txs
+        except Exception as e:
+            logger.warning("neighbor fetch failed %s: %s", nb, e)
+            cached = load_cached_transactions(nb)
+            if cached is not None:
+                txs_map[nb_l] = cached
+                neighbor_meta.append(
+                    {
+                        "address": nb_l,
+                        "tx_count": len(cached),
+                        "from_cache_only": True,
+                    }
+                )
+
+        report = _assemble_report(seed_lower, body.depth, txs_map, neighbor_meta)
+        yield sse(
+            {
+                "event": "snapshot",
+                "data": report,
+                "sync": {
+                    "phase": "syncing",
+                    "step": "neighbor",
+                    "index": i + 1,
+                    "total": n_total,
+                    "message": f"Loaded neighbor {i + 1} of {n_total}…",
+                },
+            }
+        )
+
+    stale = [m for m in neighbor_meta if m.get("from_cache_only")]
+    if stale:
+        yield sse(
+            {
+                "event": "status",
+                "sync": {
+                    "phase": "background_refresh",
+                    "message": "Refreshing wallets that fell back to cache…",
+                },
+            }
+        )
+        stale_ok, stale_fail = await _refresh_stale_neighbors(txs_map, neighbor_meta)
+        report = _assemble_report(seed_lower, body.depth, txs_map, neighbor_meta)
+        yield sse(
+            {
+                "event": "snapshot",
+                "data": report,
+                "sync": {
+                    "phase": "syncing",
+                    "step": "stale_refresh",
+                    "message": "Updated cache-only neighbors where possible.",
+                    "stale_refreshed": stale_ok,
+                    "stale_still_cached": stale_fail,
+                },
+            }
+        )
+        if stale_fail == 0:
+            done_msg = (
+                "Sync complete: all expanded wallets now match the latest on-chain fetch."
+            )
+        else:
+            done_msg = (
+                "Sync finished; some neighbors could not be refreshed (still cache-only)."
+            )
+    else:
+        done_msg = "Sync complete: all expanded wallets loaded from the network."
+
+    yield sse({"event": "done", "message": done_msg})
+
+
+@app.post("/analyze/stream")
+async def analyze_stream(body: AnalyzeBody) -> StreamingResponse:
+    """Server-Sent Events: progressive snapshots + final confirmation."""
+
+    async def gen() -> AsyncIterator[bytes]:
+        async for chunk in _analyze_event_bytes(body):
+            yield chunk
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
         },
-        "heuristics": heur,
-        "per_wallet": per_wallet_risk,
-        "neighbors": neighbor_meta,
-        "graph": graph,
-    }
+    )
 
 
 @app.get("/graph")

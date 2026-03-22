@@ -99,6 +99,20 @@ def build_graph_from_txs(
         incident.add(e["source"])
         incident.add(e["target"])
 
+    for k, n in nodes.items():
+        if k not in incident:
+            continue
+        txs = txs_by_address.get(k)
+        if txs is not None:
+            wc = sum(1 for tx in txs if tx.get("isError") != "1")
+        else:
+            wc = sum(
+                e["tx_count"]
+                for e in filtered_edges
+                if e["source"] == k or e["target"] == k
+            )
+        n["wallet_tx_count"] = int(wc)
+
     nodes_out = [nodes[k] for k in nodes if k in incident]
 
     return {
